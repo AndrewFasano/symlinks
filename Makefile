@@ -5,6 +5,7 @@ OWNER   = root
 GROUP   = root
 MANDIR  = /usr/man/man8/symlinks.8
 BINDIR  = /usr/local/bin
+INSTALL = install
 
 .PHONY: all
 all: symlinks
