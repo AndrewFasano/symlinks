@@ -15,7 +15,12 @@ symlinks: symlinks.c
 
 install: all symlinks.8
 	$(INSTALL) -c -o $(OWNER) -g $(GROUP) -m 755 symlinks $(BINDIR)
-	$(INSTALL) -c -o $(OWNER) -g $(GROUP) -m 644 symlinks.8 $(MANDIR)
+	if [ -d "$(MANDIR)" ]; then \
+		$(INSTALL) -c -o $(OWNER) -g $(GROUP) -m 644 symlinks.8 $(MANDIR) \
+	else \
+		echo "Warning: $(MANDIR) does not exist. Man page not installed."; \
+	fi
+
 
 .PHONY: test
 test: clean symlinks
