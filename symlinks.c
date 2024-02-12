@@ -213,50 +213,77 @@ ughh:
     return shortened;
 }
 
-char* convert_to_relative_path(char *cwd, char *path, char *abs_target) {
-    char *cwd_copy = strdup(cwd); // Duplicate because dirname and basename may modify the input
-    char *path_copy = strdup(path);
-    char *target_copy = strdup(abs_target);
-    char *result = (char*)malloc(PATH_MAX); // Allocate memory for the result
-    if (!result || !cwd_copy || !path_copy || !target_copy) {
-        // Handle allocation failure
-        free(cwd_copy);
-        free(path_copy);
-        free(target_copy);
+
+char* convert_to_relative_path(char *base_dir, char *symlink_path, char *target_abs_path) {
+    // Ensure inputs are valid
+    if (!base_dir || !symlink_path || !target_abs_path) {
         return NULL;
     }
 
-    //char *path_dir = dirname(path_copy); // Directory part of the path
-    char *rel_path = NULL;
+    char *result = (char*)malloc(PATH_MAX); // Allocate memory for the result
+    if (!result) {
+        return NULL; // Allocation failed
+    }
+    result[0] = '\0'; // Initialize the string
+
+    char *symlink_dir = strdup(dirname(symlink_path));
+    if (!symlink_dir) {
+        free(result);
+        return NULL;
+    }
+
+    // Calculate path from base_dir to target_abs_path and symlink_path
+    char *relative_to_base = realpath(base_dir, NULL); // Get absolute path of base_dir
+    char *target_relative = strdup(target_abs_path + 1); // Skip leading '/' in the target's absolute path
+    if (!relative_to_base || !target_relative) {
+        free(symlink_dir);
+        free(result);
+        free(relative_to_base);
+        free(target_relative);
+        return NULL;
+    }
+
+    // Construct the relative path from symlink_dir to base_dir
+    char *token, *next_token, *str_ptr = symlink_dir;
     size_t up_count = 0;
-
-    // Count how many levels up we need to go from the path directory to reach the common base with the target
-    char *common_base = cwd_copy;
-    while (strncmp(common_base, target_copy, strlen(common_base)) != 0) {
-        char *parent_dir = dirname(common_base);
-        if (strcmp(parent_dir, common_base) == 0) { // Reached the root without complete match
-            break;
+    while ((token = strtok_r(str_ptr, "/", &next_token)) != NULL) {
+        if (strcmp(token, "..") == 0) {
+            up_count--;
+        } else {
+            up_count++;
         }
-        common_base = strdup(parent_dir);
-        up_count++;
+        str_ptr = NULL; // strtok_r continues from the last position
     }
 
-    // Construct the relative path
-    rel_path = result;
+    // Prevent traversal above the base directory
+    size_t base_count = 0;
+    str_ptr = relative_to_base;
+    while ((token = strtok_r(str_ptr, "/", &next_token)) != NULL) {
+        base_count++;
+        str_ptr = NULL; // strtok_r continues from the last position
+    }
+    if (up_count > base_count) {
+        // Adjust up_count to not exceed base directory
+        up_count = base_count;
+    }
+
+    // Construct relative path with corrected number of "../"
     for (size_t i = 0; i < up_count; i++) {
-        strcat(rel_path, "../");
-        rel_path += 3; // Move past the "../"
+        strcat(result, "../");
     }
 
-    // Append the unique part of the target path that follows the common base
-    size_t base_len = strlen(common_base);
-    if (strlen(abs_target) > base_len) {
-        strcat(rel_path, abs_target + base_len + 1); // +1 to skip the leading '/'
-    }
+    // Append the unique part of the target path
+    strcat(result, target_relative);
 
-    free(cwd_copy);
-    free(path_copy);
-    free(target_copy);
+    free(symlink_dir);
+    free(relative_to_base);
+    free(target_relative);
+
+    // Correction for off-by-one error: correctly append target path
+    if (target_abs_path[0] == '/') {
+        // If the target was an absolute path, ensure we handle this case correctly.
+        memmove(result + strlen(result) - strlen(target_relative), target_relative, strlen(target_relative) + 1);
+    }
 
     return result;
 }
