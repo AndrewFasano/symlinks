@@ -20,6 +20,7 @@
 #include <time.h>
 #include <stddef.h>
 #include <errno.h>
+#include <libgen.h> // for dirname() and basename()
 
 #ifndef S_ISLNK
 #define S_ISLNK(mode) (((mode) & (_S_IFMT)) == (_S_IFLNK))
@@ -212,156 +213,106 @@ ughh:
     return shortened;
 }
 
+char* convert_to_relative_path(char *cwd, char *path, char *abs_target) {
+    char *cwd_copy = strdup(cwd); // Duplicate because dirname and basename may modify the input
+    char *path_copy = strdup(path);
+    char *target_copy = strdup(abs_target);
+    char *result = (char*)malloc(PATH_MAX); // Allocate memory for the result
+    if (!result || !cwd_copy || !path_copy || !target_copy) {
+        // Handle allocation failure
+        free(cwd_copy);
+        free(path_copy);
+        free(target_copy);
+        return NULL;
+    }
+
+    //char *path_dir = dirname(path_copy); // Directory part of the path
+    char *rel_path = NULL;
+    size_t up_count = 0;
+
+    // Count how many levels up we need to go from the path directory to reach the common base with the target
+    char *common_base = cwd_copy;
+    while (strncmp(common_base, target_copy, strlen(common_base)) != 0) {
+        char *parent_dir = dirname(common_base);
+        if (strcmp(parent_dir, common_base) == 0) { // Reached the root without complete match
+            break;
+        }
+        common_base = strdup(parent_dir);
+        up_count++;
+    }
+
+    // Construct the relative path
+    rel_path = result;
+    for (size_t i = 0; i < up_count; i++) {
+        strcat(rel_path, "../");
+        rel_path += 3; // Move past the "../"
+    }
+
+    // Append the unique part of the target path that follows the common base
+    size_t base_len = strlen(common_base);
+    if (strlen(abs_target) > base_len) {
+        strcat(rel_path, abs_target + base_len + 1); // +1 to skip the leading '/'
+    }
+
+    free(cwd_copy);
+    free(path_copy);
+    free(target_copy);
+
+    return result;
+}
 
 static void fix_symlink(char *cwd, char *path, dev_t my_dev) {
-    static char lpath[PATH_MAX], new[PATH_MAX], abspath[PATH_MAX];
-    char *p, *np, *lp, *tail, *msg;
-    struct stat stbuf, lstbuf;
-    int fix_abs = 0, fix_messy = 0, fix_long = 0;
-    size_t c;
-
-    if ((c = readlink(path, lpath, sizeof(lpath))) == -1) {
+    static char lpath[PATH_MAX], new[PATH_MAX];
+    //struct stat lstbuf;
+    ssize_t c;
+    
+    // Read the target of the symlink
+    c = readlink(path, lpath, sizeof(lpath) - 1);
+    if (c == -1) {
         perror(path);
         return;
     }
-    
-    lpath[c] = '\0';  /* readlink does not null terminate it */
-    /* construct the absolute address of the link */
-    abspath[0] = '\0';
-    
-    if (lpath[0] != '/') {
-        strcat(abspath, path);
-        c = strlen(abspath);
-        
-        if ((c > 0) && (abspath[c - 1] == '/')) {
-            abspath[c - 1] = '\0';	/* cut trailing / */
-        }
-        
-        if ((p = strrchr(abspath, '/')) != NULL) {
-            *p = '\0';				/* cut last component */
-        }
-        
-        strcat(abspath, "/");
-    } else	{
-        if (emb_rootfs) {
-            // we have an absolute path and work on an embbedded rootfs,
-            // so we have to add the rootfs prefix from cwd in order to find
-            // the targets of absolute symlinks
-            strcpy(abspath, cwd);
-        }
-    }
+    lpath[c] = '\0'; // Ensure null-termination
 
-    strcat(abspath, lpath);
-    (void) tidy_path(abspath);
-    
-    /* check for various things */
-    if (stat(abspath, &stbuf) == -1) {
-        printf("dangling: %s -> %s (reason: %s)\n", path, lpath, strerror(errno));
-        if (delete) {
-            if (unlink(path)) {
-                perror(path);
-            } else {
-                printf("deleted:  %s -> %s\n", path, lpath);
-            }
-        }
-        return;
-    }
-    
-    if (single_fs) {
-        lstat(abspath, &lstbuf);  /* if the above didn't fail, then this shouldn't */
-    }
-    
-    if (single_fs && lstbuf.st_dev != my_dev) {
-        msg = "other_fs:";
-    } else if (lpath[0] == '/') {
-        msg = "absolute:";
-        fix_abs = 1;
-    } else if (verbose) {
-        msg = "relative:";
-    } else {
-        msg = NULL;
-    }
-    
-    fix_messy = tidy_path(strcpy(new, lpath));
-    
-    if (shorten) {
-        fix_long = shorten_path(new, path);
-    }
-    
-    if (!fix_abs) {
-        if (fix_messy) {
-            msg = "messy:   ";
-        } else if (fix_long) {
-            msg = "lengthy: ";
-        }
-    }
-    
-    if (msg != NULL) {
-        if (fix_abs && emb_rootfs) {
-            printf("%s %s -> %s (resolved to %s)\n", msg, path, lpath, abspath);
+    // Determine if the symlink is absolute and handle it accordingly
+    int is_absolute = lpath[0] == '/';
+
+    if (is_absolute) {
+        // Convert the absolute symlink to a relative one
+        char *relative_target = convert_to_relative_path(cwd, path, lpath);
+        if (relative_target) {
+            strncpy(new, relative_target, PATH_MAX);
+            free(relative_target); // Assume convert_to_relative_path dynamically allocates memory
         } else {
-	        printf("%s %s -> %s\n", msg, path, lpath);
+            fprintf(stderr, "Error converting to relative path\n");
+            return;
         }
+    } else {
+        // If already relative, simply copy it over
+        strncpy(new, lpath, PATH_MAX);
     }
-    
-    if (!(fix_links || testing) || !(fix_messy || fix_abs || fix_long)) {
-        return;
-    }
-    
-    if (fix_abs) {
-        /* convert an absolute link to relative: */
-        /* point tail at first part of lpath that differs from path */
-        /* point p    at first part of path  that differs from lpath */
-        (void) tidy_path(lpath);
-        tail = lp = lpath;
-        p = path + strlen(cwd); // skip rootfs prefix 
-        
-        while (*p && (*p == *lp)) {
-            if (*lp++ == '/') {
-                tail = lp;
-                
-                while (*++p == '/');
-            }
-        }
-        
-        /* now create new, with "../"s followed by tail */
-        np = new;
-        
-        while (*p) {
-            if (*p++ == '/') {
-                *np++ = '.';
-                *np++ = '.';
-                *np++ = '/';
-                
-                while (*p == '/') {
-                    ++p;
-                }
-            }
-        }
-        
-        strcpy(np, tail);
-        (void) tidy_path(new);
-        
-        if (shorten) {
-            (void) shorten_path(new, path);
-        }
-    }
-    
-    shorten_path(new, path);
 
+    // Optionally, further tidy, shorten, or process the new path here
+    tidy_path(new);
+
+    if (shorten) {
+        shorten_path(new, path);
+    }
+
+    // Check if we are in testing mode or actually should fix the link
     if (!testing) {
         if (unlink(path)) {
-            perror(path);
+            perror("unlink");
             return;
         }
         
         if (symlink(new, path)) {
-            perror(path);
+            perror("symlink");
             return;
         }
     }
-    
-    printf("changed:  %s -> %s\n", path, new);
+
+    printf("changed: %s -> %s\n", path, new);
 }
 
 static void dirwalk(char *cwd, char *path, unsigned long pathlen, dev_t dev) {
